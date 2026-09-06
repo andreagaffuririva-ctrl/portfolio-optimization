@@ -1,0 +1,44 @@
+[project]
+name = "portfolio-opt"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Agaffuririva", email = "andrea.gaffuri.riva@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb>=1.5.5",
+    "matplotlib>=3.11.1",
+    "numpy>=2.5.3",
+    "pandas>=3.0.5",
+    "pandera>=0.33.1",
+    "pyarrow>=25.0.1",
+    "scipy>=1.18.1",
+    "yfinance>=1.7.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.1,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "ruff>=0.16.6",
+]
+
+[project.scripts]
+portfolio = "portfolio_opt.pipeline:main"
+
+[tool.ruff]
+line-length = 90
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
