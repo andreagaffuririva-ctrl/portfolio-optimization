@@ -85,6 +85,20 @@ def equal_weight(mu: pd.Series, cov: pd.DataFrame, cfg: Settings = settings) -> 
     return Portfolio("equal_weight", pd.Series(w, index=mu.index), ret, vol, sharpe)
 
 
+def buy_and_hold(ticker: str, daily: pd.Series, cfg: Settings = settings) -> Portfolio:
+    """The benchmark: 100% in one asset, held. Stats come from its own series.
+
+    Kept out of STRATEGIES -- it is the thing the strategies are measured
+    against, not a candidate itself.
+    """
+    from .config import TRADING_DAYS
+
+    ret = float(daily.mean() * TRADING_DAYS)
+    vol = float(daily.std(ddof=1) * np.sqrt(TRADING_DAYS))
+    sharpe = (ret - cfg.risk_free_rate) / vol if vol > 0 else 0.0
+    return Portfolio(f"benchmark_{ticker}", pd.Series({ticker: 1.0}), ret, vol, sharpe)
+
+
 STRATEGIES = {
     "equal_weight": equal_weight,
     "min_variance": min_variance,

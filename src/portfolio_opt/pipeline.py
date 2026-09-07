@@ -9,7 +9,7 @@ import pandas as pd
 
 from .config import Settings, settings
 from .ingest import ingest
-from .optimize import STRATEGIES, Portfolio, efficient_frontier
+from .optimize import STRATEGIES, Portfolio, buy_and_hold, efficient_frontier
 from .report import plot_frontier, plot_weights, write_table
 from .transform import annualise, build_gold, build_silver, returns_matrix
 
@@ -25,11 +25,14 @@ def run(cfg: Settings = settings, skip_ingest: bool = False) -> pd.DataFrame:
     build_silver()
     build_gold()
 
-    daily = returns_matrix(cfg.tickers)
-    log.info("returns matrix: %s days x %s assets", *daily.shape)
+    # Pull the benchmark in the same call so both share one aligned calendar.
+    universe = tuple(dict.fromkeys([*cfg.tickers, cfg.benchmark]))
+    aligned = returns_matrix(universe)
+    daily = aligned[list(cfg.tickers)]
     mu, cov = annualise(daily)
 
     portfolios: list[Portfolio] = [fn(mu, cov, cfg) for fn in STRATEGIES.values()]
+    portfolios.append(buy_and_hold(cfg.benchmark, aligned[cfg.benchmark], cfg))
     for p in portfolios:
         log.info(
             "%-13s return %6.2f%%  vol %6.2f%%  sharpe %.2f",
@@ -41,7 +44,8 @@ def run(cfg: Settings = settings, skip_ingest: bool = False) -> pd.DataFrame:
 
     plot_frontier(efficient_frontier(mu, cov, cfg), portfolios)
     for p in portfolios:
-        plot_weights(p)
+        if not p.name.startswith("benchmark_"):
+            plot_weights(p)  # a single 100% bar tells you nothing
     return write_table(portfolios)
 
 

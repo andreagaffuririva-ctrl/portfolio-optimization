@@ -26,12 +26,21 @@ INK = "#0b0b0b"
 INK_SECONDARY = "#52514e"
 INK_MUTED = "#8a8880"
 GRID = "#e7e6e2"
+# Three validated categorical slots. A fourth hue would break the all-pairs
+# colour-vision floor, so the benchmark is encoded by shape in neutral ink
+# instead -- which also says the right thing: it is a reference, not a strategy.
 SERIES = {"equal_weight": "#2a78d6", "min_variance": "#eb6834", "max_sharpe": "#1baf7a"}
 LABELS = {
     "equal_weight": "Equal weight",
     "min_variance": "Min variance",
     "max_sharpe": "Max Sharpe",
 }
+
+
+def _label(name: str) -> str:
+    if name.startswith("benchmark_"):
+        return f"{name.removeprefix('benchmark_')} (buy & hold)"
+    return LABELS.get(name, name)
 
 
 def _style(ax: plt.Axes) -> None:
@@ -67,19 +76,20 @@ def plot_frontier(
     )
 
     for p in portfolios:
-        colour = SERIES.get(p.name, "#2a78d6")
+        is_benchmark = p.name.startswith("benchmark_")
         ax.scatter(
             p.volatility,
             p.expected_return,
-            s=110,
-            color=colour,
+            s=130 if is_benchmark else 110,
+            color=INK if is_benchmark else SERIES.get(p.name, "#2a78d6"),
+            marker="D" if is_benchmark else "o",
             edgecolor=SURFACE,  # 2px surface ring keeps overlapping marks legible
             linewidth=2,
             zorder=3,
-            label=LABELS.get(p.name, p.name),
+            label=_label(p.name),
         )
         ax.annotate(
-            f"{LABELS.get(p.name, p.name)}\nSharpe {p.sharpe:.2f}",
+            f"{_label(p.name)}\nSharpe {p.sharpe:.2f}",
             (p.volatility, p.expected_return),
             textcoords="offset points",
             xytext=(10, 6),
@@ -140,7 +150,7 @@ def plot_weights(portfolio: Portfolio, path=None) -> plt.Figure:
         )
 
     ax.set_title(
-        f"{LABELS.get(portfolio.name, portfolio.name)} — allocation",
+        f"{_label(portfolio.name)} — allocation",
         fontsize=13,
         color=INK,
         loc="left",

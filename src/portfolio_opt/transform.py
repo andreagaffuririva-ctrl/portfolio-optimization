@@ -53,7 +53,13 @@ def build_silver() -> pd.DataFrame:
 
 
 def build_gold() -> pd.DataFrame:
-    """Daily log returns per ticker -> data/gold/returns.parquet."""
+    """Daily returns per ticker -> data/gold/returns.parquet.
+
+    Both conventions are emitted on purpose. Log returns are additive across
+    *time* but not across *assets* -- ln(sum w_i exp(r_i)) != sum w_i r_i -- so
+    mean-variance optimisation must use simple returns, while cumulative equity
+    curves are cleaner in logs.
+    """
     ensure_dirs()
     con = duckdb.connect()
     frame = con.execute(
@@ -63,7 +69,9 @@ def build_gold() -> pd.DataFrame:
                    lag(close) OVER (PARTITION BY ticker ORDER BY date) AS prev_close
             FROM read_parquet('{SILVER_DIR / "prices.parquet"}')
         )
-        SELECT date, ticker, close, ln(close / prev_close) AS log_return
+        SELECT date, ticker, close,
+               close / prev_close - 1        AS simple_return,
+               ln(close / prev_close)        AS log_return
         FROM lagged
         WHERE prev_close IS NOT NULL
         ORDER BY ticker, date
@@ -77,17 +85,60 @@ def build_gold() -> pd.DataFrame:
     return frame
 
 
-def returns_matrix(tickers: tuple[str, ...] | None = None) -> pd.DataFrame:
-    """Wide date x ticker matrix of simple returns, aligned on common dates."""
+def returns_matrix(
+    tickers: tuple[str, ...] | None = None, value: str = "simple_return"
+) -> pd.DataFrame:
+    """Wide date x ticker return matrix, aligned on dates every asset shares.
+
+    The inner join is what mean-variance needs, but it is also a trap: one
+    late-listing asset silently truncates every other column. Any date loss is
+    logged with the ticker responsible -- see PROJECT_LOG.md P1-1.
+    """
     frame = pd.read_parquet(GOLD_DIR / "returns.parquet")
     if tickers:
         frame = frame[frame["ticker"].isin(tickers)]
-    wide = frame.pivot(index="date", columns="ticker", values="log_return")
-    return wide.dropna(how="any")
+    wide = frame.pivot(index="date", columns="ticker", values=value)
+
+    aligned = wide.dropna(how="any")
+    if aligned.empty:
+        raise RuntimeError("no dates are common to every requested ticker")
+
+    _log_alignment(wide, aligned)
+    return aligned
+
+
+def _log_alignment(wide: pd.DataFrame, aligned: pd.DataFrame) -> None:
+    """Report the effective window and name whichever ticker constrains it."""
+    first_seen = wide.apply(lambda col: col.first_valid_index()).sort_values()
+    dropped = len(wide) - len(aligned)
+
+    log.info(
+        "returns window %s -> %s (%s rows x %s assets)",
+        aligned.index.min().date(),
+        aligned.index.max().date(),
+        f"{len(aligned):,}",
+        aligned.shape[1],
+    )
+    if dropped:
+        binding = first_seen.index[-1]
+        log.warning(
+            "alignment dropped %s of %s dates (%.1f%%): requested history starts "
+            "%s but %s only has data from %s. Per-ticker first dates: %s",
+            f"{dropped:,}",
+            f"{len(wide):,}",
+            100 * dropped / len(wide),
+            wide.index.min().date(),
+            binding,
+            first_seen.iloc[-1].date(),
+            {t: d.date() for t, d in first_seen.items()},
+        )
 
 
 def annualise(daily: pd.DataFrame) -> tuple[pd.Series, pd.DataFrame]:
-    """Annualised mean return vector and covariance matrix from daily returns."""
+    """Annualised mean return vector and covariance matrix from daily returns.
+
+    Expects *simple* returns -- see build_gold on why log returns are wrong here.
+    """
     return daily.mean() * TRADING_DAYS, daily.cov() * TRADING_DAYS
 
 
