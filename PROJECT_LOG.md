@@ -164,6 +164,73 @@ that is the real verdict.
 
 ---
 
+## Session 3 — 2026-09-07 (later)
+
+**Outcome:** `fix/review-followups` — items 1–4 from the code review of PR #1.
+No behaviour change: identical portfolio numbers, identical chart. These were
+correctness-of-the-supporting-code fixes. Tests 24 → 32.
+
+### Done
+
+| # | Issue | Resolution |
+|---|---|---|
+| 1 | `except Exception` retried genuine bugs | `RETRYABLE_ERRORS = (OSError, YFRateLimitError)`. Every `requests` exception subclasses `OSError`, so the network surface is covered without importing requests; `TypeError`/`AttributeError`/`KeyError` now propagate on the first attempt |
+| 2 | Alignment warning named the wrong ticker | Attribution is now **counted, not inferred**: per-ticker missing-date counts, sole-cause counts, and first/last data per ticker |
+| 3 | `buy_and_hold` untested | 5 tests, incl. one locking it to the single-asset `equal_weight` path |
+| 4 | `"benchmark_"` prefix used for control flow in 4 places | `Portfolio.is_benchmark: bool = False`; prefix is now display-only |
+
+### How each was verified rather than assumed
+
+Before fixing, each defect was reproduced:
+
+- **#1** — a stubbed `TypeError: download() got an unexpected keyword argument`
+  produced `yf.download called 4x`. Now `called 1x`, pinned by
+  `test_api_signature_change_is_not_retried`, with
+  `test_network_errors_are_still_retried` guarding the narrowing.
+- **#2** — synthetic frame (AAA complete, BBB one day late, CCC a 4-day hole)
+  reported `dropped 5 of 10 ... but BBB only has data from 2024-01-02` — BBB
+  caused 1 of 5, CCC caused 4 and went unmentioned. Now reports
+  `{'CCC': 4, 'BBB': 1}`. Pinned by
+  `test_alignment_attributes_loss_to_a_mid_series_gap`.
+- **#3** — `grep buy_and_hold tests/` returned nothing.
+- **#4** — `grep -rn "benchmark_" src/` showed the prefix in 4 places, 3 of them
+  branching on it.
+
+Live output after the fix, now accurate:
+`alignment dropped 619 of 2,683 dates (23.1%). Dates missing per ticker:
+{'XLC': 619}. Recoverable by dropping that ticker alone: {'XLC': 619}.`
+
+### Also changed (small, same expressions)
+
+- `SERIES.get(p.name, "#2a78d6")` → `SERIES[p.name]` in `report.py`. The fallback
+  silently painted an unknown strategy the same blue as equal weight. It now
+  raises. **Consequence: adding risk parity at M3 requires assigning it a colour
+  or the report crashes** — deliberate, since a silent colour collision is worse.
+- Dropped a needless function-level `from .config import TRADING_DAYS` inside
+  `buy_and_hold` (item 5 in the review; it was in a function being rewritten).
+
+### New finding, logged not fixed — P2-6
+
+`build_gold()`'s `lag(close)` spans data gaps. Missing prices are **absent rows**
+in silver, not NaNs, so a ticker returning after a 4-day hole gets a single
+"daily" return covering 5 calendar days. Surfaced while writing the test for #2:
+the expected count was 3, the real count 2, and the discrepancy was this.
+
+Harmless for the sector ETFs (no gaps), but it will silently inflate one return
+per gap on any less liquid universe, and it distorts volatility. Fix at M2 with a
+proper date spine: reindex each ticker onto the full trading calendar and require
+`date - prev_date <= 4 business days`, or emit `days_elapsed` and filter.
+
+### Still open
+
+P1-3 (non-convex max-Sharpe → cvxpy), P2-2 (ingest not incremental; **blocks M6**),
+P2-3 (no shrinkage), P2-5 (`equal_weight` ignores the cap), **P2-6 (new, above)**,
+P3-1/2/3, `report.py` still untested, and the pre-existing `efficient_frontier`
+upper bound being infeasible under the position cap (`hi = mu.max() * 0.99`) so the
+frontier's top end is truncated by solver failure rather than by design.
+
+---
+
 ## Known issues
 
 Ranked by how much they distort results or block later milestones.

@@ -6,13 +6,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from portfolio_opt.config import Settings
+from portfolio_opt.config import TRADING_DAYS, Settings
 from portfolio_opt.optimize import (
+    buy_and_hold,
     efficient_frontier,
     equal_weight,
     max_sharpe,
     min_variance,
 )
+from portfolio_opt.transform import annualise
 
 CFG = Settings(max_weight=1.0, risk_free_rate=0.0)
 
@@ -61,3 +63,54 @@ def test_frontier_is_monotone_in_return(mu_cov):
     frontier = efficient_frontier(mu, cov, CFG, points=12)
     assert len(frontier) > 5
     assert frontier["expected_return"].is_monotonic_increasing
+
+
+# --------------------------------------------------------------------------
+# the benchmark
+# --------------------------------------------------------------------------
+
+
+def test_buy_and_hold_stats_match_hand_calculation():
+    daily = pd.Series([0.01, -0.005, 0.02, 0.0, -0.01])
+    p = buy_and_hold("SPY", daily, CFG)
+
+    assert p.expected_return == pytest.approx(daily.mean() * TRADING_DAYS)
+    assert p.volatility == pytest.approx(daily.std(ddof=1) * np.sqrt(TRADING_DAYS))
+    assert p.sharpe == pytest.approx(p.expected_return / p.volatility)
+
+
+def test_buy_and_hold_is_fully_invested_in_one_asset():
+    p = buy_and_hold("SPY", pd.Series([0.01, 0.02, -0.01]), CFG)
+    assert p.weights.to_dict() == {"SPY": 1.0}
+    assert p.weights.sum() == pytest.approx(1.0)
+
+
+def test_buy_and_hold_is_flagged_as_a_benchmark():
+    """The flag drives chart rendering, so pin it rather than the name."""
+    assert buy_and_hold("SPY", pd.Series([0.01, 0.02]), CFG).is_benchmark is True
+    mu = pd.Series([0.1], index=["SPY"])
+    cov = pd.DataFrame([[0.04]], index=["SPY"], columns=["SPY"])
+    assert equal_weight(mu, cov, CFG).is_benchmark is False
+
+
+def test_buy_and_hold_agrees_with_single_asset_equal_weight():
+    """Locks the two code paths together: sqrt(w @ cov @ w) vs std * sqrt(252).
+
+    buy_and_hold derives its stats from the raw series while the strategies go
+    through the covariance matrix. They must not be allowed to drift apart.
+    """
+    daily = pd.Series([0.01, -0.005, 0.02, 0.0, -0.01, 0.015], name="SPY")
+    mu, cov = annualise(daily.to_frame())
+
+    bench = buy_and_hold("SPY", daily, CFG)
+    solo = equal_weight(mu, cov, CFG)
+
+    assert bench.expected_return == pytest.approx(solo.expected_return)
+    assert bench.volatility == pytest.approx(solo.volatility)
+    assert bench.sharpe == pytest.approx(solo.sharpe)
+
+
+def test_buy_and_hold_handles_a_flat_series():
+    p = buy_and_hold("CASH", pd.Series([0.0] * 5), CFG)
+    assert p.volatility == pytest.approx(0.0)
+    assert p.sharpe == 0.0  # guarded, not a ZeroDivisionError

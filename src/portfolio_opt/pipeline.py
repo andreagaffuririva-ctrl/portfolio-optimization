@@ -44,7 +44,7 @@ def run(cfg: Settings = settings, skip_ingest: bool = False) -> pd.DataFrame:
 
     plot_frontier(efficient_frontier(mu, cov, cfg), portfolios)
     for p in portfolios:
-        if not p.name.startswith("benchmark_"):
+        if not p.is_benchmark:
             plot_weights(p)  # a single 100% bar tells you nothing
     return write_table(portfolios)
 

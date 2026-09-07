@@ -156,3 +156,31 @@ def test_silver_dedupes_before_validating(lake):
     silver = build_silver()
     assert len(silver) == 2
     assert not silver.duplicated(["date", "ticker"]).any()
+
+
+def test_alignment_attributes_loss_to_a_mid_series_gap(lake, caplog):
+    """Regression guard: a hole in the middle must not be blamed on a late start.
+
+    The first version of this warning inferred the culprit from
+    first_valid_index, so CCC's four-date gap was attributed to BBB's one-date
+    late listing.
+    """
+    lake(
+        _prices(
+            AAA=[10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            BBB=[None, 20.0, 21.0, 22.0, 23.0, 24.0],
+            CCC=[30.0, 31.0, None, None, 34.0, 35.0],
+        )
+    )
+    build_silver()
+    build_gold()
+
+    with caplog.at_level("WARNING"):
+        returns_matrix(("AAA", "BBB", "CCC"))
+
+    assert "alignment dropped" in caplog.text
+    # CCC costs strictly more dates than BBB and must be reported as such.
+    # Two, not three: the missing rows are absent from silver rather than NaN,
+    # so lag() spans the hole and CCC has a (multi-day) return on re-entry.
+    assert "'CCC': 2" in caplog.text
+    assert "'BBB': 1" in caplog.text

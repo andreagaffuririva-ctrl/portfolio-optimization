@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from .config import Settings, settings
+from .config import TRADING_DAYS, Settings, settings
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,9 @@ class Portfolio:
     expected_return: float
     volatility: float
     sharpe: float
+    # Dispatch flag, not decoration: report and pipeline branch on this rather
+    # than on a "benchmark_" name prefix, so renaming can't break rendering.
+    is_benchmark: bool = False
 
     def to_frame(self) -> pd.DataFrame:
         return (
@@ -91,12 +94,17 @@ def buy_and_hold(ticker: str, daily: pd.Series, cfg: Settings = settings) -> Por
     Kept out of STRATEGIES -- it is the thing the strategies are measured
     against, not a candidate itself.
     """
-    from .config import TRADING_DAYS
-
     ret = float(daily.mean() * TRADING_DAYS)
     vol = float(daily.std(ddof=1) * np.sqrt(TRADING_DAYS))
     sharpe = (ret - cfg.risk_free_rate) / vol if vol > 0 else 0.0
-    return Portfolio(f"benchmark_{ticker}", pd.Series({ticker: 1.0}), ret, vol, sharpe)
+    return Portfolio(
+        name=f"benchmark_{ticker}",
+        weights=pd.Series({ticker: 1.0}),
+        expected_return=ret,
+        volatility=vol,
+        sharpe=sharpe,
+        is_benchmark=True,
+    )
 
 
 STRATEGIES = {

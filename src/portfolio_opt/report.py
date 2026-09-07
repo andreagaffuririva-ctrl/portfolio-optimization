@@ -37,10 +37,11 @@ LABELS = {
 }
 
 
-def _label(name: str) -> str:
-    if name.startswith("benchmark_"):
-        return f"{name.removeprefix('benchmark_')} (buy & hold)"
-    return LABELS.get(name, name)
+def _label(portfolio: Portfolio) -> str:
+    """Display name. The prefix strip is cosmetic -- branching is on the flag."""
+    if portfolio.is_benchmark:
+        return f"{portfolio.name.removeprefix('benchmark_')} (buy & hold)"
+    return LABELS.get(portfolio.name, portfolio.name)
 
 
 def _style(ax: plt.Axes) -> None:
@@ -76,20 +77,19 @@ def plot_frontier(
     )
 
     for p in portfolios:
-        is_benchmark = p.name.startswith("benchmark_")
         ax.scatter(
             p.volatility,
             p.expected_return,
-            s=130 if is_benchmark else 110,
-            color=INK if is_benchmark else SERIES.get(p.name, "#2a78d6"),
-            marker="D" if is_benchmark else "o",
+            s=130 if p.is_benchmark else 110,
+            color=INK if p.is_benchmark else SERIES[p.name],
+            marker="D" if p.is_benchmark else "o",
             edgecolor=SURFACE,  # 2px surface ring keeps overlapping marks legible
             linewidth=2,
             zorder=3,
-            label=_label(p.name),
+            label=_label(p),
         )
         ax.annotate(
-            f"{_label(p.name)}\nSharpe {p.sharpe:.2f}",
+            f"{_label(p)}\nSharpe {p.sharpe:.2f}",
             (p.volatility, p.expected_return),
             textcoords="offset points",
             xytext=(10, 6),
@@ -150,7 +150,7 @@ def plot_weights(portfolio: Portfolio, path=None) -> plt.Figure:
         )
 
     ax.set_title(
-        f"{_label(portfolio.name)} — allocation",
+        f"{_label(portfolio)} — allocation",
         fontsize=13,
         color=INK,
         loc="left",

@@ -22,6 +22,7 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
+from yfinance.exceptions import YFRateLimitError
 
 from .config import BRONZE_DIR, Settings, ensure_dirs, settings
 
@@ -40,6 +41,14 @@ class PriceSource(Protocol):
 
 class TransientSourceError(RuntimeError):
     """A fetch failure worth retrying: rate limit, timeout, empty response."""
+
+
+# Every requests exception subclasses OSError, so this covers connection
+# resets, timeouts and HTTP errors without importing requests directly.
+# Deliberately NOT included: TypeError, AttributeError, KeyError and the
+# YF*Error subclasses that signal a bad ticker or a changed API -- those are
+# bugs, and retrying a bug just delays the traceback by 30 seconds.
+RETRYABLE_ERRORS: tuple[type[Exception], ...] = (OSError, YFRateLimitError)
 
 
 class YahooSource:
@@ -81,7 +90,7 @@ class YahooSource:
                 group_by="column",
                 threads=True,
             )
-        except Exception as exc:  # yfinance raises a grab-bag of network errors
+        except RETRYABLE_ERRORS as exc:
             raise TransientSourceError(f"Yahoo download failed: {exc}") from exc
         if raw is None or raw.empty:
             raise TransientSourceError(f"Yahoo returned no data for {tickers}")

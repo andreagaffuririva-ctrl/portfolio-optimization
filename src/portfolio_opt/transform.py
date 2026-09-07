@@ -108,10 +108,16 @@ def returns_matrix(
 
 
 def _log_alignment(wide: pd.DataFrame, aligned: pd.DataFrame) -> None:
-    """Report the effective window and name whichever ticker constrains it."""
-    first_seen = wide.apply(lambda col: col.first_valid_index()).sort_values()
-    dropped = len(wide) - len(aligned)
+    """Report the effective window and attribute any date loss to its cause.
 
+    Attribution is counted, not inferred. A ticker can cost dates three ways --
+    listing late, delisting early, or a hole in the middle -- so guessing from
+    first-valid-index alone names the wrong ticker whenever the loss came from a
+    gap. `missing` counts the dropped dates each ticker is actually absent for,
+    and `sole_cause` isolates the dates only that one ticker is missing, which is
+    what you would recover by removing it.
+    """
+    dropped = len(wide) - len(aligned)
     log.info(
         "returns window %s -> %s (%s rows x %s assets)",
         aligned.index.min().date(),
@@ -119,19 +125,30 @@ def _log_alignment(wide: pd.DataFrame, aligned: pd.DataFrame) -> None:
         f"{len(aligned):,}",
         aligned.shape[1],
     )
-    if dropped:
-        binding = first_seen.index[-1]
-        log.warning(
-            "alignment dropped %s of %s dates (%.1f%%): requested history starts "
-            "%s but %s only has data from %s. Per-ticker first dates: %s",
-            f"{dropped:,}",
-            f"{len(wide):,}",
-            100 * dropped / len(wide),
-            wide.index.min().date(),
-            binding,
-            first_seen.iloc[-1].date(),
-            {t: d.date() for t, d in first_seen.items()},
-        )
+    if not dropped:
+        return
+
+    holes = wide.isna()
+    lost = holes.loc[holes.any(axis=1)]
+    missing = lost.sum().sort_values(ascending=False)
+    sole_cause = lost.loc[lost.sum(axis=1) == 1].sum()
+
+    log.warning(
+        "alignment dropped %s of %s dates (%.1f%%). Dates missing per ticker: %s. "
+        "Recoverable by dropping that ticker alone: %s. First/last data per ticker: %s",
+        f"{dropped:,}",
+        f"{len(wide):,}",
+        100 * dropped / len(wide),
+        {t: int(n) for t, n in missing.items() if n},
+        {t: int(n) for t, n in sole_cause.sort_values(ascending=False).items() if n},
+        {
+            t: (
+                wide[t].first_valid_index().date(),
+                wide[t].last_valid_index().date(),
+            )
+            for t in wide.columns
+        },
+    )
 
 
 def annualise(daily: pd.DataFrame) -> tuple[pd.Series, pd.DataFrame]:
