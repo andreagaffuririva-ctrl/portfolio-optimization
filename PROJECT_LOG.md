@@ -231,6 +231,124 @@ frontier's top end is truncated by solver failure rather than by design.
 
 ---
 
+## Session 4 — 2026-09-07 (M3)
+
+**Outcome:** `feat/m3-backtest` — M3 complete. Shrinkage, cvxpy, two new
+strategies, and the walk-forward backtest. Tests 32 → 64. This is the milestone
+that turns the project from "three portfolios" into evidence.
+
+### Built
+
+| Component | File | Notes |
+|---|---|---|
+| Covariance estimators | `covariance.py` (new) | sample + Ledoit-Wolf; only the covariance is shrunk, not the mean |
+| Convex optimiser | `optimize.py` (rewritten) | cvxpy throughout; five strategies |
+| Risk parity | `optimize.py` | Spinu (2013) convex form: min 0.5 w'Sw - (1/n)sum(log w) |
+| Max diversification | `optimize.py` | max-Sharpe program with volatilities in place of excess returns |
+| Walk-forward engine | `backtest.py` (new) | rolling window, month-end rebalance, t+1 execution, drift, costs |
+| Backtest charts | `report.py` | equity curve (log), drawdown, in-vs-out-of-sample Sharpe |
+| Two-pass pipeline | `pipeline.py` | in-sample illustration and walk-forward, reported side by side |
+
+### Issues closed
+
+- **P1-3** — max-Sharpe was non-convex under SLSQP. Now the standard change of
+  variables (`y = w / ((mu-rf)'w)`) makes it a QP with a guaranteed global
+  optimum. Pinned by `test_max_sharpe_is_start_point_independent`, which checks
+  400 random long-only portfolios cannot beat the reported Sharpe.
+- **P2-3** — Ledoit-Wolf shrinkage available and now the default.
+- **P2-5** — `equal_weight` silently breached `max_weight`; it now raises.
+- **Pre-existing frontier bug** — `hi = mu.max() * 0.99` was infeasible under the
+  position cap, so the top of the frontier was decided by solver failure.
+  Replaced with `max_attainable_return()`, which solves for it. Measured: max
+  attainable under the 35% cap is **18.59%** vs the best single asset's 24.74%,
+  so roughly a quarter of the old frontier's range never existed.
+
+### The result
+
+Out-of-sample, 88 rebalances, 7.2 years, net of 10bps one-way costs:
+
+| Strategy | CAGR | Sharpe | Turnover/yr | In-sample Sharpe | Retained |
+|---|---|---|---|---|---|
+| **SPY (buy & hold)** | 16.06% | **0.75** | 14% | 0.72 | 104% |
+| Max diversification | 13.24% | 0.66 | 55% | 0.72 | 91% |
+| Equal weight | 13.15% | 0.65 | 30% | 0.65 | **100%** |
+| Risk parity | 12.39% | 0.63 | 31% | 0.65 | 97% |
+| Min variance | 8.67% | 0.47 | 47% | 0.62 | 76% |
+| Max Sharpe | 7.59% | 0.38 | **203%** | **0.82** | **46%** |
+
+**Every optimiser loses to the index.** And the ranking inverts: max-Sharpe was
+best in-sample (0.82) and is worst out-of-sample (0.38), while burning 203% of
+the portfolio in annual turnover.
+
+The retention column sorts by how much each strategy must estimate. Equal weight
+estimates nothing → keeps 100%. Max diversification and risk parity use only the
+covariance, the stable moment → 91-97%. Max Sharpe needs the mean vector, the
+hardest quantity in finance to estimate → 46%. This is the DeMiguel, Garlappi &
+Uppal (2009) 1/N result, reproduced on our own data.
+
+### Honest null result worth keeping
+
+**Shrinkage made almost no difference.** Ledoit-Wolf picks intensity 0.014 on the
+full sample, and `--estimator sample` moves out-of-sample Sharpe by <= 0.01. With
+756 observations for 11 assets, there is enough data that the sample estimator is
+fine. Shrinkage pays when T/N is small — the natural demo is 30+ single stocks on
+a 1-year window, which would be a good M3.5 exercise. Recording this rather than
+implying the shrinkage "worked".
+
+### Design decisions
+
+- **Drift is simulated day by day.** An earlier draft expanded target weights to
+  a daily held frame, which reported equal weight as having *zero* maintenance
+  turnover — wrong, because a fixed target still needs trades as prices move.
+  `_simulate()` now evolves holdings with returns and only pulls them back on
+  execution days. Guarded by `test_unchanged_target_still_costs_money`.
+- **Costs land on the execution day**, not the decision day, matching when the
+  new weights start earning.
+- **Look-ahead is tested behaviourally, not just structurally.**
+  `test_mutating_the_future_cannot_change_the_past` replaces the tail of the
+  return series with garbage and asserts every prior net return is unchanged.
+  A structural test of `shift(1)` would pass even if the estimator leaked.
+- **Frontier scatter dropped its colours.** Six marks exceed the three-slot
+  all-pairs colour-vision floor, so strategy points are neutral with direct
+  labels; the five categorical hues moved to the equity/drawdown lines, where
+  the adjacent pairlist applies and five slots validate.
+- **Risk parity does not honour `max_weight`.** Capping would destroy the
+  equal-risk property, so a breach is logged instead of silently producing
+  something that is neither. Verified equal risk on real data: all 11
+  contributions 0.0909, spread 8.4e-6.
+- **Both CAGR and annualised arithmetic mean are reported.** They differ by the
+  volatility drag, and quoting one as the other is a standard way to flatter a
+  backtest.
+
+### Verification
+
+- 64/64 tests pass, offline, 2.34s
+- Live run produces 11 artefacts; both passes logged side by side
+- All four charts inspected; two layout defects found and fixed (legend colliding
+  with a value label, log-axis falling back to scientific notation)
+- `--estimator sample` cross-check run to confirm the shrinkage null result
+
+### Still open
+
+P2-2 (ingest not incremental; **blocks M6**), P2-6 (lag spans gaps), P3-1/2/3,
+`report.py` still untested. New for M3:
+
+- **P2-7** — no significance test on the Sharpe differences. "SPY wins" is a
+  description of one 7.2-year path, not an inference. Deflated Sharpe or a
+  stationary bootstrap would let the project say how confident it is.
+- **P2-8** — costs are flat 10bps with no spread, slippage or market impact.
+  Max Sharpe's 203% turnover is exactly the case where that simplification
+  flatters the result most.
+- **P2-9** — one universe, one period. No sensitivity analysis over the
+  estimation window (756d), rebalance frequency, or cost assumption. Three
+  knobs, all unexamined, each capable of changing the ranking.
+
+**Next: M2 (dbt + incremental) or M4 (MLflow).** M4 is now more attractive than
+before — with three knobs worth sweeping (P2-9), experiment tracking has real
+work to do rather than being ceremony over a single run.
+
+---
+
 ## Known issues
 
 Ranked by how much they distort results or block later milestones.
@@ -267,7 +385,7 @@ Severity: **P1** = wrong output or blocks a milestone · **P2** = real defect, c
 - **Fix:** emit **both** `simple_return` and `log_return` in gold. Use simple returns
   for optimisation inputs, log returns for time-aggregation and cumulative charts.
 
-### P1-3 — Max-Sharpe objective is non-convex; SLSQP finds a local optimum
+### ~~P1-3~~ — RESOLVED session 4 · Max-Sharpe objective non-convex under SLSQP
 
 - **Where:** `optimize.py:max_sharpe()` minimises `-sharpe` directly.
 - **What:** The Sharpe ratio is a ratio of a linear to a quadratic form — not convex.
@@ -313,7 +431,7 @@ Severity: **P1** = wrong output or blocks a milestone · **P2** = real defect, c
 - **Fix:** partition bronze by year (`bronze/year=2024/prices.parquet`), read the
   existing max date per ticker, fetch only from there forward, and merge.
 
-### P2-3 — Sample covariance, unshrunk
+### ~~P2-3~~ — RESOLVED session 4 · Sample covariance, unshrunk
 
 - **Where:** `transform.py:annualise()` — plain `daily.cov()`.
 - **What:** 11 assets → 66 covariance parameters from 2,064 observations. Workable,
@@ -331,7 +449,7 @@ Severity: **P1** = wrong output or blocks a milestone · **P2** = real defect, c
   assert the pandera gate rejects a negative close and a duplicate `(date, ticker)`;
   assert `returns_matrix` alignment behaviour explicitly (which would have caught P1-1).
 
-### P2-5 — `equal_weight()` ignores `cfg.max_weight`
+### ~~P2-5~~ — RESOLVED session 4 · `equal_weight()` ignored `cfg.max_weight`
 
 - **Where:** `optimize.py:equal_weight()` hardcodes `1/n`.
 - **What:** With 11 assets, `1/11 = 9.1% < 35%`, so it is *currently* harmless — but

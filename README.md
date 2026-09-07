@@ -4,13 +4,16 @@ A didactic, production-shaped project: pull daily prices for the 11 S&P sector
 SPDR ETFs, build a validated data lake, construct optimal portfolios, and grow
 the whole thing into an orchestrated, monitored ML system.
 
-**Status: M1 complete + data-correctness pass** — a thin end-to-end slice runs today.
+**Status: M3 complete** — the walk-forward backtest is in, so the results are now
+out-of-sample and honest.
 
 ```bash
 uv sync
-uv run portfolio              # ingest -> transform -> optimise -> reports/
-uv run portfolio --skip-ingest  # reuse cached bronze data
-uv run pytest                 # fully offline; the price source is stubbed
+uv run portfolio                     # ingest -> transform -> optimise -> backtest -> reports/
+uv run portfolio --skip-ingest       # reuse cached bronze data
+uv run portfolio --skip-backtest     # in-sample pass only (fast)
+uv run portfolio --estimator sample  # compare against unshrunk covariance
+uv run pytest                        # 64 tests, fully offline
 ```
 
 ## Architecture
@@ -36,7 +39,9 @@ Yahoo Finance ──▶ bronze/  raw OHLCV parquet, immutable, idempotent
 | `config.py` | every tunable in one frozen dataclass, so runs are reproducible |
 | `ingest.py` | bronze layer; Yahoo behind a `PriceSource` Protocol so it's swappable |
 | `transform.py` | silver + gold via DuckDB SQL; pandera schema gates the pipeline; logs the effective date window |
-| `optimize.py` | portfolio construction and the efficient frontier |
+| `covariance.py` | sample and Ledoit-Wolf shrinkage estimators |
+| `optimize.py` | five strategies as convex programs, plus the efficient frontier |
+| `backtest.py` | walk-forward engine: rolling window, monthly rebalance, drift, costs |
 | `report.py` | charts on a CVD-validated palette, plus a CSV table view |
 | `pipeline.py` | wires the slice together; exposed as the `portfolio` CLI |
 
@@ -54,35 +59,80 @@ swapping in Stooq or Tiingo later touches one class.
 | ✅ | **M0** Scaffold — uv, ruff, pytest, pre-commit, CI | engineering hygiene |
 | ✅ | **M1** Thin slice — ingest → transform → optimise → report | data engineering |
 | ☐ | **M2** dbt models over DuckDB; incremental loads; freshness tests | analytics engineering |
-| ☐ | **M3** Ledoit-Wolf shrinkage, risk parity, cvxpy, walk-forward backtest vs SPY | data science |
+| ✅ | **M3** Ledoit-Wolf shrinkage, cvxpy, risk parity, walk-forward backtest vs SPY | data science |
 | ☐ | **M4** MLflow — every backtest is a tracked run | MLOps |
 | ☐ | **M5** Expected-return forecasting model (and how to tell if it has any alpha) | ML |
 | ☐ | **M6** Dagster assets, daily schedule, freshness checks | orchestration |
 | ☐ | **M7** FastAPI `POST /optimize` + Streamlit dashboard | serving |
 | ☐ | **M8** Evidently drift monitoring, model registry promotion gate | production MLOps |
 
-## Current results
+## Results
 
-Sector ETFs, long-only, 35% cap. **Effective window 2018-06-20 → today** (2,064
-days): XLC was only created in June 2018, and mean-variance needs a common
-calendar, so the inner join truncates the earlier history. The pipeline now logs
-this explicitly rather than doing it silently.
+### Out-of-sample — the walk-forward backtest
 
-| Strategy | Return | Volatility | Sharpe |
+756-day rolling estimation window, month-end rebalancing, 10bps one-way costs on
+a portfolio that drifts between rebalances. 88 rebalances, 7.2 years, 2019-07 →
+2026-09. Weights computed at each month-end are executed the **next** trading day.
+
+| Strategy | CAGR | Vol | Sharpe | Max DD | Calmar | Turnover/yr |
+|---|---|---|---|---|---|---|
+| **SPY (buy & hold)** | **16.06%** | 19.67% | **0.75** | −33.7% | **0.48** | 14% |
+| Max diversification | 13.24% | 18.47% | 0.66 | −39.6% | 0.33 | 55% |
+| Equal weight | 13.15% | 18.49% | 0.65 | −36.2% | 0.36 | 30% |
+| Risk parity | 12.39% | 17.96% | 0.63 | −35.7% | 0.35 | 31% |
+| Min variance | 8.67% | 16.22% | 0.47 | −33.1% | 0.26 | 47% |
+| Max Sharpe | 7.59% | 19.02% | 0.38 | −33.4% | 0.23 | **203%** |
+
+### In-sample vs out-of-sample
+
+| Strategy | In-sample Sharpe | Out-of-sample | Retained |
 |---|---|---|---|
-| Equal weight | 13.60% | 18.01% | 0.64 |
-| Min variance | 11.42% | 15.27% | 0.62 |
-| Max Sharpe | 16.22% | 17.32% | 0.82 |
-| **SPY (buy & hold)** | **15.88%** | **19.17%** | **0.72** |
+| Max Sharpe | 0.82 | 0.38 | **46%** |
+| Min variance | 0.62 | 0.47 | 76% |
+| Max diversification | 0.72 | 0.66 | 91% |
+| Risk parity | 0.65 | 0.63 | 97% |
+| Equal weight | 0.65 | 0.65 | **100%** |
+| SPY (buy & hold) | 0.72 | 0.75 | 104% |
 
-Two things to read off this table:
+## What this actually shows
 
-**Equal weight and min variance both lose to simply buying SPY.** All that
-machinery, and two of three strategies are beaten by the benchmark on a
-risk-adjusted basis. That is the normal result, and it is why the benchmark row
-exists.
+**Every optimiser loses to buying the index.** Not one of the five beats SPY's
+0.75 Sharpe out of sample. The most sophisticated method available here is worse
+than the least sophisticated thing possible.
 
-**Max Sharpe "winning" is meaningless.** These are **in-sample, ex-ante**
-figures — the optimiser saw the exact returns it is optimising over, so it wins
-by construction. Only M3's walk-forward backtest can say anything honest, and
-the usual finding is that the advantage evaporates out of sample.
+**Max Sharpe is the worst strategy, having been the best in-sample.** It keeps
+46% of its apparent edge, and it trades **203% of the portfolio per year** to
+achieve that. It is a machine for converting estimation error into transaction
+costs: sampling noise in the mean-return vector moves the optimum a long way,
+so it chases sector rankings that do not persist.
+
+**The less a strategy estimates, the better it travels.** The retention column
+sorts almost perfectly by how much the strategy needs to know. Equal weight
+estimates nothing and keeps 100%. Max diversification and risk parity use only
+the covariance — the *stable* moment — and keep 91–97%. Max Sharpe needs the
+mean, the hardest thing in finance to estimate, and keeps 46%. This reproduces
+the well-known DeMiguel, Garlappi & Uppal (2009) result that 1/N is hard to beat.
+
+**Shrinkage barely mattered here** — an honest null result. Ledoit-Wolf picks a
+shrinkage intensity of only 0.014 on the full sample, and swapping it for the raw
+sample covariance moves out-of-sample Sharpe by ≤0.01 (`--estimator sample`).
+With 756 observations for 11 assets there is simply enough data. Shrinkage earns
+its keep when T/N is small; try it with 30+ stocks and a 1-year window.
+
+## Caveats on the above
+
+- **One period, one universe.** 7.2 years, mostly a bull market with two sharp
+  drawdowns. No significance test on the Sharpe differences, so "SPY wins" is
+  not established at any confidence level — it is what happened.
+- **Costs are a flat 10bps** on one-way turnover, with no spread, slippage or
+  market impact. Max Sharpe's 203% turnover would suffer more than this in reality.
+- **The risk-free rate is a hardcoded 2%** across a period spanning ZIRP and 5%+
+  policy rates, so every Sharpe is only loosely calibrated. Tracked as P3-3.
+- **Risk parity ignores the position cap** — capping would break the equal-risk
+  property, so a breach is logged rather than silently mangled.
+- **SPY is not a fair fight in one respect**: it is a market-cap-weighted index
+  that had a historically concentrated run in mega-cap tech, which no
+  equal-ish-weighted sector portfolio could match. That is a real explanation,
+  not an excuse — the strategies still lost.
+
+See `PROJECT_LOG.md` for the full issue list and next steps.
