@@ -131,3 +131,32 @@ def test_schema_break_is_not_retried(monkeypatch, no_backoff):
     with pytest.raises(RuntimeError, match="missing columns"):
         YahooSource(attempts=4).fetch(tickers, "2024-01-01", None)
     assert calls["n"] == 1
+
+
+def test_api_signature_change_is_not_retried(monkeypatch, no_backoff):
+    """A TypeError means yfinance changed under us -- a bug, not a blip.
+
+    Regression guard: this used to be swallowed by `except Exception` and
+    retried four times with backoff before surfacing.
+    """
+    calls = {"n": 0}
+
+    def wrong_signature(*args, **kwargs):
+        calls["n"] += 1
+        raise TypeError("download() got an unexpected keyword argument 'group_by'")
+
+    monkeypatch.setattr("portfolio_opt.ingest.yf.download", wrong_signature)
+    with pytest.raises(TypeError):
+        YahooSource(attempts=4).fetch(("XLK",), "2024-01-01", None)
+    assert calls["n"] == 1
+
+
+def test_network_errors_are_still_retried(monkeypatch, no_backoff):
+    """The narrowing must not have broken the case retries exist for."""
+    tickers = ("XLK",)
+    flaky = FlakyYahoo(
+        _fake_yahoo_frame(tickers), failures=1, exc=ConnectionError("reset by peer")
+    )
+    monkeypatch.setattr("portfolio_opt.ingest.yf.download", flaky)
+    YahooSource(attempts=3).fetch(tickers, "2024-01-01", None)
+    assert flaky.calls == 2
