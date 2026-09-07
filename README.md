@@ -4,7 +4,7 @@ A didactic, production-shaped project: pull daily prices for the 11 S&P sector
 SPDR ETFs, build a validated data lake, construct optimal portfolios, and grow
 the whole thing into an orchestrated, monitored ML system.
 
-**Status: M1 complete** — a thin end-to-end slice runs today.
+**Status: M1 complete + data-correctness pass** — a thin end-to-end slice runs today.
 
 ```bash
 uv sync
@@ -35,7 +35,7 @@ Yahoo Finance ──▶ bronze/  raw OHLCV parquet, immutable, idempotent
 |---|---|
 | `config.py` | every tunable in one frozen dataclass, so runs are reproducible |
 | `ingest.py` | bronze layer; Yahoo behind a `PriceSource` Protocol so it's swappable |
-| `transform.py` | silver + gold via DuckDB SQL; pandera schema gates the pipeline |
+| `transform.py` | silver + gold via DuckDB SQL; pandera schema gates the pipeline; logs the effective date window |
 | `optimize.py` | portfolio construction and the efficient frontier |
 | `report.py` | charts on a CVD-validated palette, plus a CSV table view |
 | `pipeline.py` | wires the slice together; exposed as the `portfolio` CLI |
@@ -63,14 +63,26 @@ swapping in Stooq or Tiingo later touches one class.
 
 ## Current results
 
-Sector ETFs, 2016→today, long-only, 35% cap:
+Sector ETFs, long-only, 35% cap. **Effective window 2018-06-20 → today** (2,064
+days): XLC was only created in June 2018, and mean-variance needs a common
+calendar, so the inner join truncates the earlier history. The pipeline now logs
+this explicitly rather than doing it silently.
 
 | Strategy | Return | Volatility | Sharpe |
 |---|---|---|---|
-| Equal weight | 11.0% | 18.1% | 0.50 |
-| Min variance | 9.7% | 15.3% | 0.50 |
-| Max Sharpe | 13.6% | 17.0% | 0.68 |
+| Equal weight | 13.60% | 18.01% | 0.64 |
+| Min variance | 11.42% | 15.27% | 0.62 |
+| Max Sharpe | 16.22% | 17.32% | 0.82 |
+| **SPY (buy & hold)** | **15.88%** | **19.17%** | **0.72** |
 
-These are **in-sample, ex-ante** figures — the optimiser saw the same returns it
-is optimising over, so max-Sharpe winning here proves nothing. M3's walk-forward
-backtest is what makes the comparison honest.
+Two things to read off this table:
+
+**Equal weight and min variance both lose to simply buying SPY.** All that
+machinery, and two of three strategies are beaten by the benchmark on a
+risk-adjusted basis. That is the normal result, and it is why the benchmark row
+exists.
+
+**Max Sharpe "winning" is meaningless.** These are **in-sample, ex-ante**
+figures — the optimiser saw the exact returns it is optimising over, so it wins
+by construction. Only M3's walk-forward backtest can say anything honest, and
+the usual finding is that the advantage evaporates out of sample.

@@ -15,6 +15,13 @@ from typing import Protocol
 
 import pandas as pd
 import yfinance as yf
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from .config import BRONZE_DIR, Settings, ensure_dirs, settings
 
@@ -31,31 +38,54 @@ class PriceSource(Protocol):
     ) -> pd.DataFrame: ...
 
 
+class TransientSourceError(RuntimeError):
+    """A fetch failure worth retrying: rate limit, timeout, empty response."""
+
+
 class YahooSource:
     """yfinance-backed source.
 
     Yahoo has no official public API; yfinance scrapes it. Expect occasional
-    breakage and rate limiting -- that is why downloads are batched and retried.
+    breakage and rate limiting, so the whole batch is retried with exponential
+    backoff. Only TransientSourceError is retried -- a schema change should fail
+    immediately rather than be hammered five times.
     """
 
-    def __init__(self, auto_adjust: bool = True) -> None:
+    def __init__(self, auto_adjust: bool = True, attempts: int = 4) -> None:
         self.auto_adjust = auto_adjust
+        self.attempts = attempts
 
     def fetch(
         self, tickers: tuple[str, ...], start: str, end: str | None
     ) -> pd.DataFrame:
-        raw = yf.download(
-            list(tickers),
-            start=start,
-            end=end,
-            auto_adjust=self.auto_adjust,
-            progress=False,
-            group_by="column",
-            threads=True,
+        retrying = retry(
+            stop=stop_after_attempt(self.attempts),
+            wait=wait_exponential(multiplier=2, min=2, max=30),
+            retry=retry_if_exception_type(TransientSourceError),
+            before_sleep=before_sleep_log(log, logging.WARNING),
+            reraise=True,
         )
-        if raw is None or raw.empty:
-            raise RuntimeError(f"Yahoo returned no data for {tickers}")
+        raw = retrying(self._download)(tickers, start, end)
         return _to_tidy(raw, tickers)
+
+    def _download(
+        self, tickers: tuple[str, ...], start: str, end: str | None
+    ) -> pd.DataFrame:
+        try:
+            raw = yf.download(
+                list(tickers),
+                start=start,
+                end=end,
+                auto_adjust=self.auto_adjust,
+                progress=False,
+                group_by="column",
+                threads=True,
+            )
+        except Exception as exc:  # yfinance raises a grab-bag of network errors
+            raise TransientSourceError(f"Yahoo download failed: {exc}") from exc
+        if raw is None or raw.empty:
+            raise TransientSourceError(f"Yahoo returned no data for {tickers}")
+        return raw
 
 
 def _to_tidy(raw: pd.DataFrame, tickers: tuple[str, ...]) -> pd.DataFrame:
