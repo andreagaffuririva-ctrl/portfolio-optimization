@@ -4,8 +4,8 @@ A didactic, production-shaped project: pull daily prices for the 11 S&P sector
 SPDR ETFs, build a validated data lake, construct optimal portfolios, and grow
 the whole thing into an orchestrated, monitored ML system.
 
-**Status: M3 complete** — the walk-forward backtest is in, so the results are now
-out-of-sample and honest.
+**Status: M4 complete** — walk-forward backtesting, MLflow tracking, and a
+parameter sweep that shows how much the M3 headline depended on its settings.
 
 ```bash
 uv sync
@@ -13,7 +13,11 @@ uv run portfolio                     # ingest -> transform -> optimise -> backte
 uv run portfolio --skip-ingest       # reuse cached bronze data
 uv run portfolio --skip-backtest     # in-sample pass only (fast)
 uv run portfolio --estimator sample  # compare against unshrunk covariance
-uv run pytest                        # 64 tests, fully offline
+uv run portfolio --track             # log runs to MLflow
+uv run portfolio --sweep             # 24 configurations x 6 backtests, all tracked
+uv run pytest                        # 78 tests, fully offline
+
+mlflow ui --backend-store-uri sqlite:///mlflow.db   # browse the runs
 ```
 
 ## Architecture
@@ -42,6 +46,8 @@ Yahoo Finance ──▶ bronze/  raw OHLCV parquet, immutable, idempotent
 | `covariance.py` | sample and Ledoit-Wolf shrinkage estimators |
 | `optimize.py` | five strategies as convex programs, plus the efficient frontier |
 | `backtest.py` | walk-forward engine: rolling window, monthly rebalance, drift, costs |
+| `tracking.py` | MLflow: Settings become params, metrics become metrics, charts become artifacts |
+| `sweep.py` | grid over estimation window, rebalance frequency and cost; stability analysis |
 | `report.py` | charts on a CVD-validated palette, plus a CSV table view |
 | `pipeline.py` | wires the slice together; exposed as the `portfolio` CLI |
 
@@ -60,7 +66,7 @@ swapping in Stooq or Tiingo later touches one class.
 | ✅ | **M1** Thin slice — ingest → transform → optimise → report | data engineering |
 | ☐ | **M2** dbt models over DuckDB; incremental loads; freshness tests | analytics engineering |
 | ✅ | **M3** Ledoit-Wolf shrinkage, cvxpy, risk parity, walk-forward backtest vs SPY | data science |
-| ☐ | **M4** MLflow — every backtest is a tracked run | MLOps |
+| ✅ | **M4** MLflow — every backtest is a tracked run; parameter sweeps | MLOps |
 | ☐ | **M5** Expected-return forecasting model (and how to tell if it has any alpha) | ML |
 | ☐ | **M6** Dagster assets, daily schedule, freshness checks | orchestration |
 | ☐ | **M7** FastAPI `POST /optimize` + Streamlit dashboard | serving |
@@ -119,11 +125,54 @@ sample covariance moves out-of-sample Sharpe by ≤0.01 (`--estimator sample`).
 With 756 observations for 11 assets there is simply enough data. Shrinkage earns
 its keep when T/N is small; try it with 30+ stocks and a 1-year window.
 
+### Does that ranking survive a different setting?
+
+M3 reported one configuration: 756-day window, month-end rebalance, 10bps. Three
+arbitrary choices. The M4 sweep runs all 24 combinations of
+`{252, 504, 756, 1260} x {monthly, quarterly} x {0, 10, 50}bps` — 144 backtests,
+each an MLflow run.
+
+| Strategy | Sharpe (mean ± sd) | Range | Mean rank | Configs won |
+|---|---|---|---|---|
+| **SPY (buy & hold)** | 0.75 ± 0.00 | 0.00 | **1.1** | **21 / 24** |
+| Equal weight | 0.66 ± 0.01 | 0.02 | 2.6 | 0 |
+| Max diversification | 0.65 ± 0.02 | 0.07 | 3.0 | 0 |
+| Risk parity | 0.64 ± 0.01 | 0.05 | 3.9 | 0 |
+| Max Sharpe | 0.54 ± 0.15 | **0.50** | 4.7 | **3** |
+| Min variance | 0.49 ± 0.04 | 0.13 | 5.6 | 0 |
+
+**The M3 headline was partly an artefact of one parameter.** Max Sharpe is not
+reliably the worst strategy — it is the *least reliable* strategy. Its Sharpe
+runs from 0.38 to 0.83 depending only on the estimation window, and the
+relationship is not even monotonic:
+
+| Window | 252 | 504 | 756 | 1260 |
+|---|---|---|---|---|
+| Max Sharpe (ME, 10bps) | **0.82** | 0.48 | **0.38** | 0.58 |
+| Equal weight | 0.65 | 0.65 | 0.65 | 0.65 |
+
+At a 252-day window it beats SPY outright and wins its three configurations.
+M3 happened to pick 756 — max Sharpe's worst.
+
+**This is not evidence that max Sharpe is good with a 252-day window.** A
+strategy whose performance swings by 0.5 Sharpe on a parameter with no
+theoretical justification has demonstrated parameter sensitivity, not skill.
+Choosing 252 *after* seeing these results is precisely the selection bias that
+walk-forward testing exists to prevent — the honest reading is that this family
+of methods cannot be relied on here, which the ± column says more clearly than
+any single run could.
+
+Everything that estimates less stays flat: equal weight varies by 0.02 across all
+24 configurations, and SPY by 0.00 because it depends on none of the knobs.
+
 ## Caveats on the above
 
 - **One period, one universe.** 7.2 years, mostly a bull market with two sharp
   drawdowns. No significance test on the Sharpe differences, so "SPY wins" is
-  not established at any confidence level — it is what happened.
+  not established at any confidence level — it is what happened. The sweep
+  widens the parameter axis but not the data axis: all 24 configurations share
+  the same 7.2 years, so they are 24 correlated views of one history, not 24
+  independent trials.
 - **Costs are a flat 10bps** on one-way turnover, with no spread, slippage or
   market impact. Max Sharpe's 203% turnover would suffer more than this in reality.
 - **The risk-free rate is a hardcoded 2%** across a period spanning ZIRP and 5%+

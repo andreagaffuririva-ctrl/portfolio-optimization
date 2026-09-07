@@ -413,3 +413,76 @@ def write_backtest_table(results: list, path=None) -> pd.DataFrame:
     frame.to_csv(path, index_label="strategy")
     log.info("wrote %s", path)
     return frame
+
+
+def plot_sweep_sensitivity(
+    long_frame: pd.DataFrame,
+    rebalance: str = "ME",
+    cost_bps: float = 10.0,
+    path=None,
+) -> plt.Figure:
+    """Out-of-sample Sharpe against estimation window, one line per strategy.
+
+    Filtered to a single rebalance frequency and cost level so this stays one
+    panel of lines: small multiples would compare every colour pair at once and
+    only three slots clear that floor, whereas five clear the adjacent-pair gates
+    that apply to lines.
+
+    The chart exists to answer one question -- would a different, equally
+    arbitrary parameter choice have produced a different headline?
+    """
+    ensure_dirs()
+    path = path or REPORTS_DIR / "sweep_sensitivity.png"
+
+    frame = long_frame[
+        (long_frame["rebalance"] == rebalance)
+        & (long_frame["transaction_cost_bps"] == cost_bps)
+    ]
+    fig, ax = plt.subplots(figsize=(8.5, 5.6), facecolor=SURFACE)
+    _style(ax)
+
+    for name, group in frame.groupby("strategy"):
+        group = group.sort_values("estimation_window")
+        is_benchmark = str(name).startswith("benchmark_")
+        ax.plot(
+            group["estimation_window"],
+            group["sharpe"],
+            color=INK if is_benchmark else SERIES[name],
+            linewidth=2.2 if is_benchmark else 2,
+            linestyle="--" if is_benchmark else "-",
+            marker="D" if is_benchmark else "o",
+            markersize=6,
+            markeredgecolor=SURFACE,
+            markeredgewidth=1.5,
+            zorder=3 if is_benchmark else 2,
+            label=_name_label(str(name)),
+        )
+
+    ax.set_xticks(sorted(frame["estimation_window"].unique()))
+    ax.set_title(
+        f"Does the ranking survive a different estimation window? "
+        f"({rebalance} rebalance, {cost_bps:.0f}bps)",
+        fontsize=12,
+        color=INK,
+        loc="left",
+        pad=14,
+    )
+    ax.set_xlabel("Estimation window (trading days)", fontsize=10, color=INK_SECONDARY)
+    ax.set_ylabel("Out-of-sample Sharpe", fontsize=10, color=INK_SECONDARY)
+
+    # Below the axes: the max-Sharpe line sweeps through every in-plot corner.
+    legend = ax.legend(
+        frameon=False,
+        fontsize=9,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.13),
+        ncols=3,
+    )
+    for text in legend.get_texts():
+        text.set_color(INK_SECONDARY)
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=160, facecolor=SURFACE)
+    plt.close(fig)
+    log.info("wrote %s", path)
+    return fig
