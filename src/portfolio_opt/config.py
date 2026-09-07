@@ -41,6 +41,15 @@ class Settings:
     max_weight: float = 0.35  # concentration cap per asset
     allow_short: bool = False
 
+    # --- covariance ---
+    covariance_estimator: str = "ledoit_wolf"  # or "sample"
+
+    # --- walk-forward backtest ---
+    estimation_window: int = 756  # ~3 years of trading days
+    min_estimation_days: int = 252  # refuse to trade on less than a year
+    rebalance: str = "ME"  # pandas offset alias: month-end
+    transaction_cost_bps: float = 10.0  # per unit of turnover, one way
+
 
 settings = Settings()
 
