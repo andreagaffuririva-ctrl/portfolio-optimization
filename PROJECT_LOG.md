@@ -339,13 +339,107 @@ P2-2 (ingest not incremental; **blocks M6**), P2-6 (lag spans gaps), P3-1/2/3,
 - **P2-8** — costs are flat 10bps with no spread, slippage or market impact.
   Max Sharpe's 203% turnover is exactly the case where that simplification
   flatters the result most.
-- **P2-9** — one universe, one period. No sensitivity analysis over the
-  estimation window (756d), rebalance frequency, or cost assumption. Three
-  knobs, all unexamined, each capable of changing the ranking.
+- **~~P2-9~~ — RESOLVED session 5.** No sensitivity analysis over the estimation
+  window, rebalance frequency, or cost assumption. All three swept in M4, and
+  the ranking *did* change: max Sharpe wins 3 of 24 configurations. The "each
+  capable of changing the ranking" worry was correct.
 
 **Next: M2 (dbt + incremental) or M4 (MLflow).** M4 is now more attractive than
 before — with three knobs worth sweeping (P2-9), experiment tracking has real
 work to do rather than being ceremony over a single run.
+
+---
+
+## Session 5 — 2026-09-07 (M4)
+
+**Outcome:** `feat/m4-mlflow` — MLflow tracking plus the parameter sweep it
+exists to serve. Tests 64 → 78. The sweep materially revises the M3 conclusion.
+
+### Built
+
+| Component | File | Notes |
+|---|---|---|
+| MLflow tracking | `tracking.py` (new) | Settings -> params, metrics -> metrics, charts -> artifacts |
+| Parameter sweep | `sweep.py` (new) | grid over the three knobs; `stability()` summarises wins and spread |
+| Sensitivity chart | `report.py` | Sharpe vs estimation window, one line per strategy |
+| CLI | `pipeline.py` | `--track` and `--sweep` |
+
+### The finding — M3's headline was partly a parameter artefact
+
+24 configurations (`{252,504,756,1260}d` x `{ME,QE}` x `{0,10,50}bps`), 144
+backtests:
+
+| Strategy | Sharpe mean +/- sd | Range | Mean rank | Configs won |
+|---|---|---|---|---|
+| benchmark_SPY | 0.75 +/- 0.00 | 0.00 | 1.1 | **21/24** |
+| equal_weight | 0.66 +/- 0.01 | 0.02 | 2.6 | 0 |
+| max_diversification | 0.65 +/- 0.02 | 0.07 | 3.0 | 0 |
+| risk_parity | 0.64 +/- 0.01 | 0.05 | 3.9 | 0 |
+| max_sharpe | 0.54 +/- 0.15 | **0.50** | 4.7 | **3** |
+| min_variance | 0.49 +/- 0.04 | 0.13 | 5.6 | 0 |
+
+**Max Sharpe wins 3 of 24 configurations**, all at a 252-day window, where it
+scores 0.82 and beats SPY. M3 used 756 days, which is its *worst* setting
+(0.38). The relationship is non-monotonic — 0.82 / 0.48 / 0.38 / 0.58 across
+252 / 504 / 756 / 1260 — so it is not "shorter is better" either.
+
+**Correct reading, and the one to keep:** this is not evidence that max Sharpe
+works at 252 days. A method whose Sharpe swings 0.5 on a parameter nobody can
+justify a priori has demonstrated *sensitivity*, not skill. Picking 252 after
+seeing the sweep is exactly the selection bias walk-forward testing exists to
+prevent. The `+/- 0.15` is the finding; the 0.82 is a draw from it.
+
+The stability ordering is the same lesson as M3's retention column, restated:
+what estimates less, varies less. Equal weight moves 0.02 across all 24
+configurations, SPY 0.00.
+
+### Design decisions
+
+- **SQLite tracking backend, not the file store.** MLflow now raises on
+  `file://` — the filesystem backend is in maintenance mode. `mlflow.db` plus
+  `mlartifacts/` is the documented local replacement and what `mlflow ui
+  --backend-store-uri sqlite:///mlflow.db` expects. Discovered by hitting the
+  exception, not by reading ahead.
+- **`params_from()` sorts the universe** before stringifying, so two runs over
+  the same tickers compare equal regardless of config ordering.
+- **NaN metrics are dropped, not logged.** MLflow accepts NaN and it poisons
+  sorting and comparison in the UI. `test_nan_metrics_are_skipped` pins this.
+- **The comparison run logs `strategies_beating_benchmark`** — one integer that
+  answers the project's actual question, visible in the run list without
+  opening anything.
+- **Sensitivity chart is one panel, filtered to ME/10bps.** Small multiples
+  would compare every colour pair at once and only three slots clear that
+  floor; a single line panel uses the adjacent pairlist, where five validate.
+  Legend sits below the axes because the max-Sharpe line sweeps through every
+  in-plot corner.
+
+### New issue — P3-6
+
+The sweep re-solves every optimisation for each cost level, but transaction cost
+does not affect the weights at all — only the net return series. Three cost
+levels therefore do three times the solver work for identical portfolios. The
+24-configuration sweep takes ~15 minutes and could take ~5. Restructure so
+weights are computed once per (window, rebalance) and cost variants are applied
+afterwards.
+
+### Verification
+
+- 78/78 tests pass, offline, 15.6s
+- Tracked run inspected via `mlflow.search_runs`: 7 runs, params and metrics present
+- Full 24-configuration sweep run to completion; `--sweep` wiring separately
+  smoke-tested on a 2-configuration grid after the chart was added
+- Sensitivity chart inspected; legend collision found and fixed
+
+### Still open
+
+P2-2 (incremental ingest; **blocks M6**), P2-6 (lag spans gaps), P2-7
+(no significance test — the sweep widens the *parameter* axis but all 24 runs
+share the same 7.2 years, so they are correlated views of one history, not 24
+trials), P2-8 (flat costs), P3-1/2/3, P3-6 (new, above), `report.py` untested.
+
+**Next: M2 (dbt + incremental ingest) or M5 (forecasting).** M2 is the one with
+a downstream dependency — M6's daily schedule cannot exist until ingest is
+incremental.
 
 ---
 

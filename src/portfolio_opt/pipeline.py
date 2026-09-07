@@ -19,7 +19,7 @@ import logging
 import pandas as pd
 
 from .backtest import buy_and_hold_backtest, summary, walk_forward
-from .config import Settings, settings
+from .config import REPORTS_DIR, Settings, settings
 from .covariance import estimate, shrinkage_intensity
 from .ingest import ingest
 from .optimize import (
@@ -34,10 +34,13 @@ from .report import (
     plot_equity_curve,
     plot_frontier,
     plot_sharpe_decay,
+    plot_sweep_sensitivity,
     plot_weights,
     write_backtest_table,
     write_table,
 )
+from .sweep import grid, stability
+from .tracking import configure, log_backtest, log_comparison
 from .transform import build_gold, build_silver, returns_matrix
 
 log = logging.getLogger(__name__)
@@ -111,24 +114,60 @@ def walk_forward_pass(daily: pd.DataFrame, benchmark: pd.Series, cfg: Settings):
     return results
 
 
-def run(
-    cfg: Settings = settings,
-    skip_ingest: bool = False,
-    skip_backtest: bool = False,
-) -> pd.DataFrame:
+def _load(cfg: Settings, skip_ingest: bool) -> tuple[pd.DataFrame, pd.Series]:
     if skip_ingest:
         log.info("skipping ingest, reusing data/bronze")
     else:
         ingest(cfg)
-
     build_silver()
     build_gold()
 
     # Pull the benchmark in the same call so both share one aligned calendar.
     universe = tuple(dict.fromkeys([*cfg.tickers, cfg.benchmark]))
     aligned = returns_matrix(universe)
-    daily = aligned[list(cfg.tickers)]
-    benchmark = aligned[cfg.benchmark]
+    return aligned[list(cfg.tickers)], aligned[cfg.benchmark]
+
+
+def run_sweep(cfg: Settings = settings, skip_ingest: bool = False) -> pd.DataFrame:
+    """Sweep the backtest knobs and report how stable the M3 ranking is."""
+    daily, benchmark = _load(cfg, skip_ingest)
+    long_frame = grid(daily, benchmark, base=cfg)
+
+    out = REPORTS_DIR / "sweep_results.csv"
+    long_frame.to_csv(out, index=False)
+    log.info("wrote %s (%s rows)", out, f"{len(long_frame):,}")
+
+    plot_sweep_sensitivity(long_frame)
+    table = stability(long_frame)
+    table.to_csv(REPORTS_DIR / "sweep_stability.csv", index_label="strategy")
+    log.info(
+        "stability across %s configurations:",
+        long_frame.groupby(
+            ["estimation_window", "rebalance", "transaction_cost_bps"]
+        ).ngroups,
+    )
+    for name, row in table.iterrows():
+        log.info(
+            "  %-20s sharpe %5.2f +/- %.2f  range %.2f  mean rank %.1f  wins %d",
+            name,
+            row["sharpe_mean"],
+            row["sharpe_std"],
+            row["sharpe_range"],
+            row["rank_mean"],
+            row["wins"],
+        )
+    return table
+
+
+def run(
+    cfg: Settings = settings,
+    skip_ingest: bool = False,
+    skip_backtest: bool = False,
+    track: bool = False,
+) -> pd.DataFrame:
+    daily, benchmark = _load(cfg, skip_ingest)
+    if track:
+        configure()
 
     log.info("=== in-sample (illustrative only) ===")
     portfolios = in_sample_pass(daily, benchmark, cfg)
@@ -141,6 +180,19 @@ def run(
     log.info("=== walk-forward (out-of-sample) ===")
     results = walk_forward_pass(daily, benchmark, cfg)
     table = write_backtest_table(results)
+
+    if track:
+        charts = [
+            REPORTS_DIR / n
+            for n in ("equity_curve.png", "drawdown.png", "sharpe_decay.png")
+        ]
+        for result in results:
+            log_backtest(result, cfg, tags={"kind": "single"}, artifacts=charts)
+        log_comparison(table, cfg)
+        log.info(
+            "logged %s runs (view: mlflow ui --backend-store-uri sqlite:///mlflow.db)",
+            len(results) + 1,
+        )
 
     plot_sharpe_decay(
         in_sample={p.name: p.sharpe for p in portfolios},
@@ -181,6 +233,14 @@ def main() -> None:
     parser.add_argument(
         "--skip-backtest", action="store_true", help="in-sample pass only"
     )
+    parser.add_argument(
+        "--track", action="store_true", help="log runs to MLflow (mlruns/)"
+    )
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="sweep estimation window, rebalance frequency and cost; implies --track",
+    )
     parser.add_argument("--start", default=None, help="override history start date")
     parser.add_argument(
         "--estimator",
@@ -198,7 +258,15 @@ def main() -> None:
         overrides["covariance_estimator"] = args.estimator
     cfg = Settings(**overrides) if overrides else settings
 
-    run(cfg, skip_ingest=args.skip_ingest, skip_backtest=args.skip_backtest)
+    if args.sweep:
+        run_sweep(cfg, skip_ingest=args.skip_ingest)
+    else:
+        run(
+            cfg,
+            skip_ingest=args.skip_ingest,
+            skip_backtest=args.skip_backtest,
+            track=args.track,
+        )
 
 
 if __name__ == "__main__":
